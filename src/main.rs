@@ -4,6 +4,7 @@ use ansi_term::{Colour::*, Style};
 use anyhow::{Context, Result};
 use aws_config::Region;
 use aws_sdk_dsql::auth_token::{self, AuthTokenGenerator};
+use aws_sdk_iam::operation::simulate_principal_policy::SimulatePrincipalPolicyOutput;
 use aws_sdk_sts::Client as StsClient;
 use aws_sdk_sts::{config::ProvideCredentials, error::BoxError};
 use aws_types::SdkConfig;
@@ -145,7 +146,7 @@ async fn main() -> Result<()> {
     };
 
     println!("\n4. Checking policy...");
-    match test_db_connect_policy(
+    let (is_admin, sim) = match do_policy_sim(
         &sdk_config,
         &cluster_endpoint.cluster_arn(&identity)?,
         &args.user,
@@ -153,15 +154,7 @@ async fn main() -> Result<()> {
     )
     .await
     {
-        Ok(is_admin) => {
-            println!(
-                "{}",
-                Green.bold().paint(format!(
-                    "\u{713} AWS policy allows connecting as {})",
-                    if is_admin { "admin" } else { "non-admin user" }
-                ))
-            );
-        }
+        Ok(it) => it,
         Err(err) => {
             println!(
                 "{}",
@@ -173,7 +166,98 @@ async fn main() -> Result<()> {
                 "   - Check if your AWS user has permission to call {}",
                 Style::new().bold().paint("iam:SimulatePrincipalPolicy")
             );
+
+            suggest_policy_update(
+                &identity,
+                "iam.SimulatePrincipalPolicy",
+                "iam:SimulatePrincipalPolicy",
+            );
+            anyhow::bail!("Unable to simulate permissions");
         }
+    };
+
+    if sim.is_truncated() {
+        anyhow::bail!("Too many results");
+    }
+
+    for result in sim.evaluation_results() {
+        match result.eval_decision() {
+            aws_sdk_iam::types::PolicyEvaluationDecisionType::Allowed => {}
+            aws_sdk_iam::types::PolicyEvaluationDecisionType::ExplicitDeny => {
+                println!(
+                    "{}",
+                    Red.bold().paint(format!(
+                        "Not authorized to call {} due to explicit deny",
+                        result.eval_action_name()
+                    ))
+                );
+                println!("You will need to remove the explicit deny from your policy");
+                anyhow::bail!("Explicit deny");
+            }
+            aws_sdk_iam::types::PolicyEvaluationDecisionType::ImplicitDeny => {
+                println!(
+                    "{}",
+                    Red.bold().paint(format!(
+                        "Not authorized to call {} due to implicit deny",
+                        result.eval_action_name()
+                    ))
+                );
+                println!("You will need to explicitly authorize this action");
+
+                suggest_policy_update(
+                    &identity,
+                    &result.eval_action_name().replace(":", "."),
+                    result.eval_action_name(),
+                );
+
+                anyhow::bail!("Implicit deny");
+            }
+            not => anyhow::bail!(
+                "Not authorized to call {}: {not}",
+                result.eval_action_name()
+            ),
+        }
+    }
+
+    println!(
+        "{}",
+        Green.bold().paint(format!(
+            "AWS policy allows connecting as {}",
+            if is_admin { "admin" } else { "non-admin user" }
+        ))
+    );
+
+    if is_admin {
+        println!(
+            r#"
+Given we were not able to connect to the cluster, but your policies allow admin
+access, you should diagnose the actual connection between your client and {}.
+"#,
+            args.cluster_endpoint
+        );
+    } else {
+        println!(
+            r#"
+Given we were not able to connect to the cluster, but your policies did allow
+access, you should ensure your IAM entity has permission to the role {user}.
+
+If you have access to the cluster as admin, the following may help:
+
+1. You can look at existing grants by running:
+
+       SELECT * FROM sys.iam_pg_role_mappings;
+
+   Make sure the output contains the tuple:
+       - arn = {iam_entity}
+       - pg_role_name = {user}
+
+2. You can grant access by running:
+
+       AWS IAM GRANT {user} TO '{iam_entity}';
+"#,
+            user = args.user,
+            iam_entity = identity.arn,
+        );
     }
 
     Ok(())
@@ -258,17 +342,17 @@ async fn test_cluster_connectivity(sdk_config: &SdkConfig, args: &Args) -> Resul
     Ok(())
 }
 
-async fn test_db_connect_policy(
+async fn do_policy_sim(
     sdk_config: &SdkConfig,
     cluster_arn: &str,
     user: &str,
     identity: &AwsIdentity,
-) -> Result<bool> {
+) -> Result<(bool, SimulatePrincipalPolicyOutput)> {
     let is_admin = if user == "admin" { true } else { false };
     let action = if is_admin {
-        "dsql:DbConnect"
-    } else {
         "dsql:DbConnectAdmin"
+    } else {
+        "dsql:DbConnect"
     };
 
     let client = aws_sdk_iam::Client::new(&sdk_config);
@@ -283,16 +367,34 @@ async fn test_db_connect_policy(
             "Failed to simulate {action}. Check your permissions."
         ))?;
 
-    if sim.is_truncated() {
-        anyhow::bail!("Too many results");
-    }
+    Ok((is_admin, sim))
+}
 
-    for result in sim.evaluation_results() {
-        match result.eval_decision() {
-            aws_sdk_iam::types::PolicyEvaluationDecisionType::Allowed => {}
-            not => anyhow::bail!("Not authorized to call {action}: {not}"),
-        }
-    }
+fn suggest_policy_update(identity: &AwsIdentity, policy_name: &str, action: &str) {
+    let (action_part, entity_name) = if identity.arn.contains(":user/") {
+        let n = identity.arn.split(":user/").nth(1);
+        ("user", n.unwrap_or("IAM_USER_NAME"))
+    } else if identity.arn.contains(":role/") {
+        let n = identity.arn.split(":role/").nth(1);
+        ("role", n.unwrap_or("IAM_ROLE_NAME"))
+    } else {
+        return;
+    };
 
-    Ok(is_admin)
+    println!(
+        r#"You can add this policy by running:
+
+aws {profile_arg} iam put-{action_part}-policy --{action_part}-name {entity_name} --policy-name '{policy_name}' --policy-document '{{
+    "Version": "2012-10-17",
+    "Statement": [{{
+        "Effect": "Allow",
+        "Action": "{action}",
+        "Resource": "*"
+    }}]
+}}'
+
+If you don't have access to modify profiles, please ask your administrator for help.
+"#,
+        profile_arg = Style::new().bold().paint("--profile YOUR_ADMIN_PROFILE")
+    );
 }
