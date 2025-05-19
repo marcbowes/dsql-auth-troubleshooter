@@ -12,7 +12,10 @@ cargo install --git https://github.com/marcbowes/dsql-auth-troubleshooter.git --
 Usage:
 
 ``` sh
-dsql-auth-troubleshooter --cluster-endpoint $YOUR_CLUSTER_ID.dsql.$AWS_REGION.on.aws --user $YOUR_POSTGRES_USER --region $AWS_REGION
+dsql-auth-troubleshooter \
+    --cluster-endpoint $YOUR_CLUSTER_ID.dsql.$AWS_REGION.on.aws \
+    --user $YOUR_POSTGRES_USER \
+    --region $AWS_REGION
 ```
 
 This tool initializes the AWS SDK with defaults. This means you can provide
