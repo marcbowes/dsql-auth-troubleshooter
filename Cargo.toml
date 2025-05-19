@@ -1,0 +1,20 @@
+[package]
+name = "dsql-auth-troubleshooter"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+clap = { version = "4.4", features = ["derive", "env"] }
+aws-config = "1.0"
+aws-types = "1.0"
+aws-sdk-sts = "1.0"
+aws-sdk-iam = "1.0"
+aws-sdk-dsql = "1.0"
+tokio = { version = "1", features = ["full"] }
+anyhow = "1.0"
+chrono = "0.4.41"
+tokio-postgres = "0.7.13"
+postgres-native-tls = "0.5.1"
+native-tls = { version = "0.2.14", features = ["alpn"] }
+ansi_term = "0.12.1"
+s2n-codec = "0.58.0"
