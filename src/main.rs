@@ -58,7 +58,37 @@ async fn main() -> Result<()> {
         );
     }
 
-    println!("\n1. Checking AWS credentials...");
+    println!("\n1. Checking connectivity to DSQL cluster...");
+    match test_cluster_connectivity(&sdk_config, &args).await {
+        Ok(_) => {
+            println!(
+                "{}",
+                Green
+                    .bold()
+                    .paint("\u{2713} Successfully connected to the cluster endpoint")
+            );
+
+            return Ok(());
+        }
+        Err(err) => {
+            println!(
+                "{}",
+                Red.bold().paint(format!(
+                    "\u{2717} Failed to connect to the cluster endpoint: {err}"
+                ))
+            );
+            println!("   Possible solutions:");
+            println!("   - Check if the cluster endpoint is correct");
+            println!("   - Verify your network connectivity");
+            println!("   - Ensure your VPC security groups allow connections from your IP");
+            println!("   - Ensure your Postgres user (role) is correct");
+            println!(
+                "   - Ensure your Postgres user (role) has permission to connect (see `AWS IAM GRANT` in the DSQL documentation)"
+            );
+        }
+    }
+
+    println!("\n2. Checking AWS credentials...");
     match validate_aws_creds_locally(&sdk_config).await {
         Ok(()) => {
             println!(
@@ -84,7 +114,7 @@ async fn main() -> Result<()> {
         }
     }
 
-    println!("\n2. Testing AWS credentials...");
+    println!("\n3. Testing AWS credentials...");
     let identity = match test_aws_credentials(&sdk_config).await {
         Ok(identity) => {
             println!(
@@ -114,7 +144,7 @@ async fn main() -> Result<()> {
         }
     };
 
-    println!("\n3. Checking policy...");
+    println!("\n4. Checking policy...");
     match test_db_connect_policy(
         &sdk_config,
         &cluster_endpoint.cluster_arn(&identity)?,
@@ -140,46 +170,9 @@ async fn main() -> Result<()> {
             );
             println!("   Possible solutions:");
             println!(
-                "   - Check if your AWS user has permission to call iam:SimulatePrincipalPolicy"
+                "   - Check if your AWS user has permission to call {}",
+                Style::new().bold().paint("iam:SimulatePrincipalPolicy")
             );
-            println!(
-                "{}",
-                Style::new().italic().paint(
-                    r#"
-Continuing as it is possible you can still connect with your policy. If the next
-step fails, consider adding iam:SimulatePrincipalPolicy because then this
-utility can give you more specific help."#
-                )
-            );
-        }
-    }
-
-    println!("\n4. Checking connectivity to DSQL cluster...");
-    match test_cluster_connectivity(&sdk_config, &args).await {
-        Ok(_) => {
-            println!(
-                "{}",
-                Green
-                    .bold()
-                    .paint("\u{2713} Successfully connected to the cluster endpoint")
-            )
-        }
-        Err(err) => {
-            println!(
-                "{}",
-                Red.bold().paint(format!(
-                    "\u{2717} Failed to connect to the cluster endpoint: {err}"
-                ))
-            );
-            println!("   Possible solutions:");
-            println!("   - Check if the cluster endpoint is correct");
-            println!("   - Verify your network connectivity");
-            println!("   - Ensure your VPC security groups allow connections from your IP");
-            println!("   - Ensure your Postgres user (role) is correct");
-            println!(
-                "   - Ensure your Postgres user (role) has permission to connect (see `AWS IAM GRANT` in the DSQL documentation)"
-            );
-            anyhow::bail!("Unable to connect");
         }
     }
 
